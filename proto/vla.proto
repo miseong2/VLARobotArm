@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package vla;
+
+service VLAService {
+  // 단일/다중 관찰로부터 액션 예측
+  rpc Predict (PredictRequest) returns (PredictResponse);
+}
+
+message Image {
+  bytes data = 1;          // 인코딩된 이미지 바이트 (JPEG)
+  string camera_name = 2;  // "primary", "wrist" 등
+}
+
+message PredictRequest {
+  repeated Image images = 1;  // 다중 카메라 지원
+  string instruction = 2;     // 자연어 명령
+  repeated float state = 3;
+}
+
+message PredictResponse {
+  repeated float actions = 1; // 7차원 액션 (또는 Chunking된 액션)
+  int32 action_dim = 2;       // 7
+  int32 chunk_size = 3;      // Octo의 경우 보통 1 이상
+}
