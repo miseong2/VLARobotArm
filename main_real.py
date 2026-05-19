@@ -24,8 +24,8 @@ USE_REMOTE_AGENT = True
 USE_REAL_CAMERA  = True   # 실제 카메라 사용
 PRETRAINED_MODE  = False
 
-CAM_TOP_INDEX    = 0
-CAM_WRIST_INDEX  = 2
+CAM_TOP_INDEX    = 2
+CAM_WRIST_INDEX  = 0
 
 DEFAULT_URDF = "/home/aivlab/SO-ARM100/Simulation/SO101/so101_new_calib.urdf"
 URDF_PATH = os.getenv("ROBOT_URDF", DEFAULT_URDF)
@@ -58,7 +58,7 @@ def main():
         robot=env.shadow_robot,
         ee_link=env.ee_link,
         action_scaling=1.0,
-        smoothing_alpha=0.5,
+        smoothing_alpha=0.6,
     )
 
     # ------------------------------------------------------------------
@@ -70,15 +70,33 @@ def main():
     cam_top.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cam_top.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cam_top.set(cv2.CAP_PROP_FPS, 30)
+    # V4L2 default buffer=4 frames → 30fps 카메라를 10Hz로 read 시 항상 ~133ms stale.
+    # BUFFERSIZE=1로 강제하여 latest frame만 큐에 유지.
+    cam_top.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     cam_wrist = cv2.VideoCapture(CAM_WRIST_INDEX)
     cam_wrist.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cam_wrist.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cam_wrist.set(cv2.CAP_PROP_FPS, 30)
+    cam_wrist.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     if not cam_top.isOpened() or not cam_wrist.isOpened():
         print("🚨 카메라를 열 수 없습니다. 인덱스를 확인해 주세요.")
         sys.exit(1)
+
+    # set 호출이 silently fail할 수 있으므로 실제 적용값 검증 print.
+    # 학습 분포는 640x480 @ 30fps 가정 → 다르면 도메인 갭 발생.
+    for name, cam in [("cam_top  ", cam_top), ("cam_wrist", cam_wrist)]:
+        w = cam.get(cv2.CAP_PROP_FRAME_WIDTH)
+        h = cam.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        fps = cam.get(cv2.CAP_PROP_FPS)
+        buf = cam.get(cv2.CAP_PROP_BUFFERSIZE)
+        print(f"📷 {name} actual: {w:.0f}x{h:.0f} @ {fps:.0f}fps, buffersize={buf:.0f}")
+
+    # 에피소드 시작 전에 서버 내부 상태(prev_images, prev_state) 초기화.
+    # 동일 서버에 재접속하는 경우 이전 run의 잔재가 첫 추론을 오염시키지 않도록.
+    if hasattr(agent, "reset"):
+        agent.reset()
 
     print(f"🚀 실물 로봇 제어 시작 | 태스크: '{instruction}'")
     time.sleep(1) # 카메라 및 통신 안정화 대기
@@ -116,6 +134,8 @@ def main():
                 state=q_deg,
                 # state=None if PRETRAINED_MODE else q_deg,
             )
+            # hardcoding debugging
+            # raw_action = np.array([0.0, -0.01, 0.01, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
             # (4) IK 계산 및 실제 로봇 모터로 전송
             q_target, gripper_target = controller.get_joint_targets(raw_action, current_state)

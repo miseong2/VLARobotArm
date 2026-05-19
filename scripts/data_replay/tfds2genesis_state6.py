@@ -54,7 +54,7 @@ def main():
     except Exception as e:
         print(f"데이터셋 로드 실패: {e}")
         return
-    
+
     print("데이터셋을 성공적으로 로드했습니다. 시각화를 시작합니다...")
 
     # 설정값 (데이터셋이 10fps로 전처리되었으므로 10으로 설정)

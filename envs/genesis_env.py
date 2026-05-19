@@ -177,9 +177,15 @@ class GenesisEnv:
     def step(self, q_target, gripper_target, sub_steps=30):
         if hasattr(q_target, "cpu"):
             q_target = q_target.detach().cpu().numpy()
-            
+
+        # 암 관절: IK가 rad로 풀어주므로 Genesis(rad)에 그대로 전달.
         self.robot.control_dofs_position(q_target[self.arm_joints], self.arm_joints)
-        self.robot.control_dofs_position(np.array([gripper_target]), self.gripper_joint)
-        
+
+        # 그리퍼: IKController.ghost_gripper는 모터 단위(deg, clip 0~96)로 누적됨.
+        # Genesis는 rad를 기대하므로 deg→rad 변환 후 전달.
+        # (real 경로는 변환 없이 그대로 모터에 씀 — hardware_server가 deg를 받음)
+        gripper_target_rad = np.deg2rad(float(gripper_target))
+        self.robot.control_dofs_position(np.array([gripper_target_rad]), self.gripper_joint)
+
         for _ in range(sub_steps):
             self.scene.step()

@@ -1,6 +1,5 @@
 import grpc
 import numpy as np
-import cv2
 from PIL import Image
 from .base_agent import BaseAgent
 import proto.vla_pb2 as vla_pb2
@@ -15,25 +14,28 @@ class RemoteAgent(BaseAgent):
 
     def predict(self, image, instruction, wrist_image=None, state=None):
         """
-        image: PIL Image (Primary)
+        image: PIL Image (Primary, RGB)
         instruction: str
-        wrist_image: PIL Image (Optional, Wrist)
+        wrist_image: PIL Image (Optional, Wrist, RGB)
         state: list of floats (Optional, Robot Joint Positions)
         """
-        # 1. 이미지 압축
-        def encode_image(pil_img):
-            img_np = np.array(pil_img)
-            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-            _, buffer = cv2.imencode('.jpg', img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-            return buffer.tobytes()
+        # 1. 이미지를 raw RGB bytes로 직렬화 (학습 데이터와 동일하게 lossless)
+        # JPEG q=90 인코딩(~3-5ms) + cvtColor 두 번을 모두 제거 → 사이클당 ~15ms 단축.
+        def to_image_proto(pil_img, camera_name):
+            img_np = np.ascontiguousarray(np.array(pil_img))  # RGB uint8 (H, W, 3)
+            h, w = img_np.shape[:2]
+            return vla_pb2.Image(
+                data=img_np.tobytes(),
+                camera_name=camera_name,
+                height=h,
+                width=w,
+            )
 
-        # 2. gRPC 요청 구성 (top/wrist 이름 명시적 사용)
-        image_list = [
-            vla_pb2.Image(data=encode_image(image), camera_name="top")
-        ]
-        
+        # 2. gRPC 요청 구성 (LeRobot 수집 시 명명 그대로: top / front)
+        image_list = [to_image_proto(image, "top")]
+
         if wrist_image:
-            image_list.append(vla_pb2.Image(data=encode_image(wrist_image), camera_name="wrist"))
+            image_list.append(to_image_proto(wrist_image, "front"))
 
         request = vla_pb2.PredictRequest(
             images=image_list,
@@ -44,10 +46,30 @@ class RemoteAgent(BaseAgent):
         # 3. RPC 호출
         try:
             response = self.stub.Predict(request)
-            return np.array(response.actions, dtype=np.float32)
+            # [CHUNK] 서버가 (chunk_size * action_dim) flatten된 array를 보냄.
+            # 기존: shape (7,) 단일 action 반환.
+            # 변경: shape (chunk_size, action_dim) 예: (4, 7) 반환.
+            # main_real2.py의 ChunkBuffer는 (K, action_dim)을 가정.
+            # (구 main_real.py는 단일 action을 가정하므로 chunk[0]만 사용하려면
+            #  호출부에서 arr[0]로 squeeze 필요)
+            arr = np.array(response.actions, dtype=np.float32)
+            if response.chunk_size > 0 and response.action_dim > 0:
+                expected = response.chunk_size * response.action_dim
+                if arr.size == expected:
+                    return arr.reshape(response.chunk_size, response.action_dim)
+            return arr  # fallback: shape 정보 없으면 그대로
         except grpc.RpcError as e:
             print(f"🚨 gRPC Error: {e.code()} - {e.details()}")
-            return np.zeros(7, dtype=np.float32) # 에러 시 정지 명령 반환
+            # [CHUNK] fallback도 (1, 7) 2D로 통일해 client에서 ndim 분기를 단순화
+            return np.zeros((1, 7), dtype=np.float32)
+
+    def reset(self):
+        """에피소드 시작 시 서버 prev_images/prev_state 초기화."""
+        try:
+            response = self.stub.Reset(vla_pb2.ResetRequest())
+            print(f"🔄 Agent reset: {response.status}")
+        except grpc.RpcError as e:
+            print(f"🚨 gRPC Reset Error: {e.code()} - {e.details()}")
 
     def __del__(self):
         if hasattr(self, 'channel'):

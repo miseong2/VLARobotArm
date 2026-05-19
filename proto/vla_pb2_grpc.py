@@ -19,6 +19,11 @@ class VLAServiceStub(object):
                 request_serializer=vla__pb2.PredictRequest.SerializeToString,
                 response_deserializer=vla__pb2.PredictResponse.FromString,
                 )
+        self.Reset = channel.unary_unary(
+                '/vla.VLAService/Reset',
+                request_serializer=vla__pb2.ResetRequest.SerializeToString,
+                response_deserializer=vla__pb2.ResetResponse.FromString,
+                )
 
 
 class VLAServiceServicer(object):
@@ -31,6 +36,13 @@ class VLAServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Reset(self, request, context):
+        """에피소드 시작 시 서버 내부 상태(prev_images, prev_state) 초기화
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_VLAServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -38,6 +50,11 @@ def add_VLAServiceServicer_to_server(servicer, server):
                     servicer.Predict,
                     request_deserializer=vla__pb2.PredictRequest.FromString,
                     response_serializer=vla__pb2.PredictResponse.SerializeToString,
+            ),
+            'Reset': grpc.unary_unary_rpc_method_handler(
+                    servicer.Reset,
+                    request_deserializer=vla__pb2.ResetRequest.FromString,
+                    response_serializer=vla__pb2.ResetResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -63,5 +80,22 @@ class VLAService(object):
         return grpc.experimental.unary_unary(request, target, '/vla.VLAService/Predict',
             vla__pb2.PredictRequest.SerializeToString,
             vla__pb2.PredictResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def Reset(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/vla.VLAService/Reset',
+            vla__pb2.ResetRequest.SerializeToString,
+            vla__pb2.ResetResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

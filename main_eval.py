@@ -29,10 +29,14 @@ DEFAULT_URDF = "/home/aivlab/SO-ARM100/Simulation/SO101/so101_new_calib.urdf"
 URDF_PATH = os.getenv("ROBOT_URDF", DEFAULT_URDF)
 
 INSTRUCTIONS = [
-    "pick up the orange cube",    # pickup 태스크
-    "put inside the container",   # put_inside 태스크
+    "move above the orange cube",  # main_real2와 일치
+    "put inside the container",    # put_inside 태스크
 ]
 CURRENT_TASK_IDX = 0
+
+# main_real2와 일치: action chunking 사용. Octo 학습 시 action_horizon=4.
+ACTION_DIM    = 7
+ACTION_CHUNK  = 4
 
 TARGET_LATENCY = 0.0   # 논문용 인위적 지연(초). 일반 테스트 시 0.0
 # ===================================================================
@@ -104,11 +108,16 @@ def main():
         robot=env.robot,
         ee_link=env.ee_link,
         action_scaling=action_scaling,
-        smoothing_alpha=0.1,
+        smoothing_alpha=0.9,   # main_real2와 일치 (1.0 → 0.9)
     )
 
     from utils.debugger import SystemDebugger
     debugger = SystemDebugger()
+
+    # 에피소드 시작 전에 서버 내부 상태(prev_images, prev_state) 초기화.
+    # 동일 서버에 재접속하는 경우 이전 run의 잔재가 첫 추론을 오염시키지 않도록.
+    if hasattr(agent, "reset"):
+        agent.reset()
 
     # ------------------------------------------------------------------
     # 4. 실제 카메라 초기화
@@ -128,12 +137,18 @@ def main():
     # ------------------------------------------------------------------
     # 5. 메인 루프
     # ------------------------------------------------------------------
+    # main_real2와 일치: 추론 1회당 (K, action_dim) chunk를 받아 K cycle 동안 순차 소비.
+    # Sim은 단일 thread이므로 chunk 소진 시점에 재추론 (real2의 async replace-on-arrival과
+    # 다르지만, 모델이 학습 시 의도한 action_horizon=K 사용 패턴은 그대로 살림)
+    chunk = None
+    chunk_idx = 0
+
     time.sleep(1)
     try:
         for i in range(1000):
             # 루프시간 기록
             loop_start_time = time.time()
-            
+
             # (1) 이미지 획득 (Genesis 렌더링)
             obs_dict = env.get_obs()
             img_primary = obs_dict['image_primary']
@@ -146,13 +161,23 @@ def main():
 
             #dummy_raw_state = [24.307, -103.428, 96.131, 80.351, -105.098, 10.489]
 
-            # (3) Octo 추론
-            raw_action = agent.predict(
-                img_primary,
-                instruction,
-                wrist_image=img_wrist,
-                state=None if PRETRAINED_MODE else q_deg,
-            )
+            # (3) Octo 추론 — chunk 소진 시점에만 재추론
+            need_predict = chunk is None or chunk_idx >= len(chunk)
+            if need_predict:
+                chunk = agent.predict(
+                    img_primary,
+                    instruction,
+                    wrist_image=img_wrist,
+                    state=q_deg,
+                    # state=None if PRETRAINED_MODE else q_deg,
+                )
+                # remote_agent는 (K, action_dim) 반환. 1D fallback도 안전 처리.
+                if chunk.ndim == 1:
+                    chunk = chunk.reshape(1, -1)
+                chunk_idx = 0
+
+            raw_action = chunk[chunk_idx]
+            chunk_idx += 1
 
             # 강제로 X축 앞으로만 1cm씩 이동하도록 셋팅
             # raw_action = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1])
@@ -162,25 +187,26 @@ def main():
             env.step(q_target, gripper_target, sub_steps=10)
 
             # (5) 터미널 로그 출력 및 카메라 입력 시각화
-            print(f"[Step {i:03d}] Task: '{instruction}'")
-            print(f"  -> Delta Pos: {np.round(raw_action[:3], 4)}")
-            print(f"  -> Delta Rot: {np.round(raw_action[3:6], 4)}")
-            print(f"  -> Gripper:   {raw_action[6]:.3f}")
+            latency = (time.time() - loop_start_time) * 1000
+            print(
+                f"[Step {i:03d}] ⏱️ {latency:5.1f}ms | "
+                f"chunk={chunk_idx-1}/{len(chunk)-1} {'🔄new' if need_predict else '     '} | "
+                f"Pos: {np.round(raw_action[:3], 3)} | Grip: {raw_action[6]:.2f}"
+            )
 
             # 입력 이미지 OpenCV 윈도우 창으로 시각화 (Dual View)
             render_top_bgr = cv2.cvtColor(np.array(img_primary), cv2.COLOR_RGB2BGR)
             render_wrist_bgr = cv2.cvtColor(np.array(img_wrist), cv2.COLOR_RGB2BGR)
             combined_bgr = np.hstack((render_top_bgr, render_wrist_bgr))
-            
+
             cv2.imshow("Input View (Top | Wrist)", combined_bgr)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+
+            # 10Hz 제어 주기 조절
             elapsed = time.time() - loop_start_time
             if elapsed < 0.1:
                 time.sleep(0.1 - elapsed)
-            
-            # [선택사항] 모델 연산이 0.1초를 초과하여 병목이 생기는지 확인하는 디버그 로그
-            print(f"⏱️ Step 소요 시간: {max(elapsed, 0.1):.3f}s (순수 연산: {elapsed:.3f}s)")
 
     except KeyboardInterrupt:
         print("\n실험 종료")

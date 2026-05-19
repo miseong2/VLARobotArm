@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+my_robot_data/
+outputs/
+.vscode/
+.DS_Store/
